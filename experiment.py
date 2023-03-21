@@ -41,12 +41,14 @@ vocab_size = logits.shape[-1]
 # %%
 from typing import Callable, Optional
 
+MIN_TOKEN = 4
+
 
 def random_induction_and_non_induction_seqs(
     batch_size: int, seq_len: int, induction_pos: int, fixed_A: Optional[int] = None, fixed_B: Optional[int] = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert induction_pos >= 0 and induction_pos <= seq_len - 4
-    seqs_with_induction = torch.randint(4, vocab_size, (batch_size, seq_len))
+    seqs_with_induction = torch.randint(MIN_TOKEN, vocab_size, (batch_size, seq_len))
 
     if fixed_A:
         seqs_with_induction[:, -2] = fixed_A
@@ -83,6 +85,12 @@ print(model.tokenizer.batch_decode(find_nearest_neighbours(tokenize_no_bos(" man
 # %%
 
 
+def log_probs_to_log_odd_ratio(log_probs: torch.Tensor) -> torch.Tensor:
+    # odd_ratio = exp(log_probs) / (1 - exp(log_probs))
+    # log_odd_ratio = log(odd_ratio) = log(exp(log_probs) / (1 - exp(log_probs))) = log(exp(log_probs)) - log(1 - exp(log_probs))
+    return log_probs - torch.log1p(-torch.exp(log_probs))
+
+
 def measure_induction_power(
     seqs_with_induction: torch.Tensor,
     seqs_without_induction: torch.Tensor,
@@ -100,7 +108,7 @@ def measure_induction_power(
     tokens_of_interest = get_toks_of_interest(seqs_with_induction)
     before = get_logprobs_of_interest(seqs_with_induction, tokens_of_interest)
     after = get_logprobs_of_interest(seqs_without_induction, tokens_of_interest)
-    diff = before - after
+    diff = log_probs_to_log_odd_ratio(before) - log_probs_to_log_odd_ratio(after)
     return diff, before, after
 
 
@@ -113,8 +121,8 @@ fixed_strs = (" Fab", "ien")
 # fixed_strs = (" M", "arius")
 # fixed_strs = ("arius", " M")
 A, B = [int(tokenize_no_bos(s).item()) for s in fixed_strs]
-# A, B = None, None
-A = None
+A, B = None, None
+# A = None
 # B = None
 
 B_IDX = 0
@@ -130,8 +138,8 @@ def get_toks_of_interest(seqs_with_induction: torch.Tensor) -> torch.Tensor:
     return torch.stack([B_toks, A_toks, *B_nns.T], dim=-1)
 
 
-length = 30
-pos = int(0.5 * (length - 4))
+length = 24
+pos = 10
 batch_size = 64
 N = 32
 all_diffs = []
@@ -140,9 +148,7 @@ all_afters = []
 all_seqs_with = []
 all_seqs_without = []
 for _ in trange(30):
-    seqs_with, seqs_without = random_induction_and_non_induction_seqs(
-        batch_size, length, pos, fixed_A=A, fixed_B=B
-    )
+    seqs_with, seqs_without = random_induction_and_non_induction_seqs(batch_size, length, pos, fixed_A=A, fixed_B=B)
     diffs, before, after = measure_induction_power(seqs_with, seqs_without, get_toks_of_interest)
     all_diffs.append(diffs)
     all_seqs_with.append(seqs_with)
@@ -167,8 +173,8 @@ plt.legend()
 # %%
 # before v after heatmap (2D histogram)
 idx = NN_IDXES[0]
-for idx, name in ((0, "B"),):
-# for idx, name in ((0, "B"), (2, "B nn"), (1, "A")):
+# for idx, name in ((0, "B"),):
+for idx, name in ((0, "B"), (2, "B nn"), (1, "A")):
     plt.hist2d(befores_c[:, idx].cpu().numpy(), afters_c[:, idx].cpu().numpy(), bins=100, range=((-20, 0), (-20, 0)))
     plt.plot([10, -20], [10, -20], color="red")
     plt.xlabel("induction")
@@ -179,55 +185,51 @@ for idx, name in ((0, "B"),):
 # %%
 import numpy as np
 
+
 def token_powers(tok) -> tuple[float, float, float, float]:
     def get_toks_of_interest(seqs_with_induction: torch.Tensor) -> torch.Tensor:
         B_toks = seqs_with_induction[:, -1]
         return B_toks.unsqueeze(-1)
+
     seqs_with, seqs_without = random_induction_and_non_induction_seqs(
-        batch_size, length, pos, fixed_A=tok, fixed_B=None,
+        batch_size,
+        length,
+        pos,
+        fixed_A=tok,
+        fixed_B=None,
     )
     diffs, _, _ = measure_induction_power(seqs_with, seqs_without, get_toks_of_interest)
     A_power = diffs[:, 0].mean().item()
     seqs_with, seqs_without = random_induction_and_non_induction_seqs(
-        batch_size, length, pos, fixed_A=None, fixed_B=tok,
+        batch_size,
+        length,
+        pos,
+        fixed_A=None,
+        fixed_B=tok,
     )
     A_power_sigma = diffs[:, 0].std().item() / np.sqrt(batch_size)
-    
+
     diffs, _, _ = measure_induction_power(seqs_with, seqs_without, get_toks_of_interest)
     B_power = diffs[:, 0].mean().item()
-    
+
     B_power_sigma = diffs[:, 0].std().item() / np.sqrt(batch_size)
-    
+
     return A_power, B_power, A_power_sigma, B_power_sigma
+
 
 all_powers = []
 # %%
-for i in trange(1000):
-    tok = torch.randint(4, vocab_size, (1,)).item()
+for i in trange(MIN_TOKEN, MIN_TOKEN + 10000):
+    tok = i
     A_pow, B_pow, A_pow_std, B_pow_std = token_powers(tok)
-    tok_str = model.tokenizer.decode([tok]) # type: ignore
+    tok_str = model.tokenizer.decode([tok])  # type: ignore
     all_powers.append((tok, tok_str, A_pow, B_pow, A_pow_std, B_pow_std))
-# %%
-# hist of A and B powers
-plt.hist([p[2] for p in all_powers], bins=100, label="A power", alpha=0.5)
-plt.hist([p[3] for p in all_powers], bins=100, label="B power", alpha=0.5)
-plt.legend()
-# %%
-# print top 10 A and B powers and bottom 10 A and B powers
-print("Top 10 A powers")
-tops = sorted(all_powers, key=lambda p: p[2], reverse=True)[:10]
-for tok, tok_str, A_pow, B_pow, A_pow_std, B_pow_std in tops:
-    print(f"{repr(tok_str)} ({tok}) A: {A_pow:.2f} += {A_pow_std:.2f} B: {B_pow:.2f} += {B_pow_std:.2f}")
-print("Top 10 B powers")
-tops = sorted(all_powers, key=lambda p: p[3], reverse=True)[:10]
-for tok, tok_str, A_pow, B_pow, A_pow_std, B_pow_std in tops:
-    print(f"{repr(tok_str)} ({tok}) A: {A_pow:.2f} += {A_pow_std:.2f} B: {B_pow:.2f} += {B_pow_std:.2f}")
-print("Bottom 10 A powers")
-tops = sorted(all_powers, key=lambda p: p[2], reverse=False)[:10]
-for tok, tok_str, A_pow, B_pow, A_pow_std, B_pow_std in tops:
-    print(f"{repr(tok_str)} ({tok}) A: {A_pow:.2f} += {A_pow_std:.2f} B: {B_pow:.2f} += {B_pow_std:.2f}")
-print("Bottom 10 B powers")
-tops = sorted(all_powers, key=lambda p: p[3], reverse=False)[:10]
-for tok, tok_str, A_pow, B_pow, A_pow_std, B_pow_std in tops:
-    print(f"{repr(tok_str)} ({tok}) A: {A_pow:.2f} += {A_pow_std:.2f} B: {B_pow:.2f} += {B_pow_std:.2f}")
-# %%
+#%%
+copy = all_powers.copy()
+# %% save to df
+import pandas as pd
+
+for i, (tok, tok_str, A_pow, B_pow, A_pow_std, B_pow_std) in enumerate(all_powers):
+    tok_str_escaped = repr(tok_str)[1:-1]
+df = pd.DataFrame(all_powers, columns=["tok", "tok_str", "A_pow", "B_pow", "A_pow_std", "B_pow_std"])
+df.to_csv("powers.csv", escapechar="\\", index=False)
